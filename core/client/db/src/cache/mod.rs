@@ -16,7 +16,7 @@
 
 //! DB-backed cache of blockchain data.
 
-use std::sync::Arc;
+use std::{sync::Arc, collections::HashMap};
 use parking_lot::RwLock;
 
 use kvdb::{KeyValueDB, DBTransaction};
@@ -25,7 +25,7 @@ use client::blockchain::Cache as BlockchainCache;
 use client::error::Result as ClientResult;
 use parity_codec::{Encode, Decode};
 use runtime_primitives::generic::BlockId;
-use runtime_primitives::traits::{Block as BlockT, Header as HeaderT, NumberFor, As, AuthorityIdFor};
+use runtime_primitives::traits::{Block as BlockT, NumberFor, As, AuthorityIdFor};
 use crate::utils::{self, COLUMN_META};
 
 use self::list_cache::ListCache;
@@ -64,7 +64,7 @@ impl<T> CacheItemT for T where T: Clone + Decode + Encode + PartialEq {}
 
 /// Database-backed blockchain data cache.
 pub struct DbCache<Block: BlockT> {
-	authorities_at: ListCache<Block, Vec<AuthorityIdFor<Block>>, self::list_storage::DbStorage>,
+	cache_at: HashMap<Vec<u8>, ListCache<Block, Vec<u8>, self::list_storage::DbStorage>>,
 }
 
 impl<Block: BlockT> DbCache<Block> {
@@ -77,7 +77,7 @@ impl<Block: BlockT> DbCache<Block> {
 		best_finalized_block: ComplexBlockId<Block>,
 	) -> Self {
 		DbCache {
-			authorities_at: ListCache::new(
+			cache_at: ListCache::new(
 				self::list_storage::DbStorage::new(b"auth".to_vec(), db,
 					self::list_storage::DbColumns {
 						meta: COLUMN_META,
@@ -104,7 +104,7 @@ impl<Block: BlockT> DbCache<Block> {
 	/// Run post-commit cache operations.
 	pub fn commit(&mut self, ops: DbCacheTransactionOps<Block>) {
 		if let Some(authorities_at_op) = ops.authorities_at_op {
-			self.authorities_at.on_transaction_commit(authorities_at_op);
+			self.cache_at.on_transaction_commit(authorities_at_op);
 		}
 	}
 }
@@ -134,19 +134,25 @@ impl<'a, Block: BlockT> DbCacheTransaction<'a, Block> {
 		mut self,
 		parent: ComplexBlockId<Block>,
 		block: ComplexBlockId<Block>,
-		authorities_at: Option<Vec<AuthorityIdFor<Block>>>,
+		cache_at: HashMap<Vec<u8>, Vec<u8>>,
 		is_final: bool,
 	) -> ClientResult<Self> {
 		assert!(self.authorities_at_op.is_none());
 
-		self.authorities_at_op = self.cache.authorities_at.on_block_insert(
+		// TODO: FIXME.
+		//for (cache_key, cache_value) in new_cache_data {
+		//	self.caches.get(cache_key) // тут надо обработать по идее insert ещё или как-то регать все эти кэши
+		//		.on_block_insert(..., cache_value)
+		//}
+
+		self.authorities_at_op = self.cache.data_at.on_block_insert(
 			&mut self::list_storage::DbStorageTransaction::new(
 				self.cache.authorities_at.storage(),
 				&mut self.tx
 			),
 			parent,
 			block,
-			authorities_at,
+			cache_at,
 			is_final,
 		)?;
 
@@ -178,7 +184,7 @@ impl<'a, Block: BlockT> DbCacheTransaction<'a, Block> {
 pub struct DbCacheSync<Block: BlockT>(pub RwLock<DbCache<Block>>);
 
 impl<Block: BlockT> BlockchainCache<Block> for DbCacheSync<Block> {
-	fn authorities_at(&self, at: BlockId<Block>) -> Option<Vec<AuthorityIdFor<Block>>> {
+	fn get_at(&self, key: &[u8], at: BlockId<Block>) -> Option<Vec<u8>> {
 		let cache = self.0.read();
 		let storage = cache.authorities_at.storage();
 		let db = storage.db();
@@ -202,6 +208,6 @@ impl<Block: BlockT> BlockchainCache<Block> for DbCacheSync<Block> {
 			},
 		};
 
-		cache.authorities_at.value_at_block(&at).ok()?
+		cache.cache_at.value_at_block(&at).ok()?
 	}
 }
